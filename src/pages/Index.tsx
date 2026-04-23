@@ -1,13 +1,23 @@
 import { useState } from "react";
 import { Search } from "lucide-react";
-import { events, searchEvents } from "@/lib/data";
+import { useEvents } from "@/hooks/useEvents";
 import { EventCard } from "@/components/EventCard";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 
 const Index = () => {
   const [query, setQuery] = useState("");
-  const filtered = query.trim() ? searchEvents(query) : events;
+  const { events, isLoading } = useEvents();
+
+  const filtered = events
+    ? query.trim()
+      ? events.filter(
+          (e) =>
+            e.title.toLowerCase().includes(query.toLowerCase()) ||
+            e.summary.toLowerCase().includes(query.toLowerCase())
+        )
+      : events
+    : [];
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
@@ -46,24 +56,37 @@ const Index = () => {
           <h2 className="mb-1 font-headline text-2xl font-bold text-headline">
             Recente gebeurtenissen
           </h2>
-          <p className="mb-8 text-sm text-caption font-body">
-            {filtered.length} gebeurtenis{filtered.length !== 1 && "sen"} gevonden
-          </p>
 
-          <div className="grid gap-6 md:grid-cols-2">
-            {filtered.map((event, i) => (
-              <div key={event.id} className="animate-fade-in" style={{ animationDelay: `${i * 80}ms` }}>
-                <EventCard event={event} />
-              </div>
-            ))}
-          </div>
-
-          {filtered.length === 0 && (
-            <div className="py-16 text-center">
-              <p className="text-lg text-muted-foreground font-body">
-                Geen gebeurtenissen gevonden voor "{query}"
-              </p>
+          {isLoading ? (
+            <div className="grid gap-6 md:grid-cols-2 mt-8">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="h-40 rounded-lg bg-muted animate-pulse" />
+              ))}
             </div>
+          ) : (
+            <>
+              <p className="mb-8 text-sm text-caption font-body">
+                {filtered.length} gebeurtenis{filtered.length !== 1 && "sen"} gevonden
+              </p>
+              <div className="grid gap-6 md:grid-cols-2">
+                {filtered.map((event, i) => (
+                  <div
+                    key={event.id}
+                    className="animate-fade-in"
+                    style={{ animationDelay: `${i * 80}ms` }}
+                  >
+                    <EventCard event={event} />
+                  </div>
+                ))}
+              </div>
+              {filtered.length === 0 && (
+                <div className="py-16 text-center">
+                  <p className="text-lg text-muted-foreground font-body">
+                    Geen gebeurtenissen gevonden voor "{query}"
+                  </p>
+                </div>
+              )}
+            </>
           )}
         </section>
       </main>

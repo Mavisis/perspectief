@@ -1,14 +1,33 @@
 import { useParams, Link } from "react-router-dom";
-import { getArticle, getOutlet } from "@/lib/data";
+import { useArticle } from "@/hooks/useArticle";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { BiasTag } from "@/components/BiasIndicator";
+import type { BiasLabel } from "@/lib/types";
 import { ArrowLeft, ArrowLeftRight } from "lucide-react";
 
 export default function ComparisonPage() {
   const { idA, idB } = useParams<{ idA: string; idB: string }>();
-  const articleA = getArticle(idA!);
-  const articleB = getArticle(idB!);
+  const { article: articleA, isLoading: loadingA } = useArticle(idA);
+  const { article: articleB, isLoading: loadingB } = useArticle(idB);
+
+  if (loadingA || loadingB) {
+    return (
+      <div className="flex min-h-screen flex-col bg-background">
+        <Header />
+        <main className="container flex-1 py-12 grid gap-6 md:grid-cols-2">
+          {[0, 1].map((i) => (
+            <div key={i} className="space-y-3">
+              <div className="h-6 w-32 rounded bg-muted animate-pulse" />
+              <div className="h-8 w-full rounded bg-muted animate-pulse" />
+              <div className="h-40 w-full rounded bg-muted animate-pulse" />
+            </div>
+          ))}
+        </main>
+        <Footer />
+      </div>
+    );
+  }
 
   if (!articleA || !articleB) {
     return (
@@ -22,10 +41,11 @@ export default function ComparisonPage() {
     );
   }
 
-  const outletA = getOutlet(articleA.outletId)!;
-  const outletB = getOutlet(articleB.outletId)!;
+  const outletA = (articleA as any).outlet;
+  const outletB = (articleB as any).outlet;
+  const biasA = (outletA?.bias ?? "center") as BiasLabel;
+  const biasB = (outletB?.bias ?? "center") as BiasLabel;
 
-  // Simple framing difference heuristics
   const wordsA = new Set(articleA.headline.toLowerCase().split(/\s+/));
   const wordsB = new Set(articleB.headline.toLowerCase().split(/\s+/));
   const sharedWords = [...wordsA].filter((w) => wordsB.has(w) && w.length > 3);
@@ -58,7 +78,7 @@ export default function ComparisonPage() {
             </p>
           </div>
 
-          {/* Framing differences */}
+          {/* Framing analysis */}
           <div className="mb-8 rounded-lg border border-divider bg-surface-warm p-5">
             <h2 className="mb-3 font-headline text-lg font-bold text-headline">
               Framing-analyse (koppen)
@@ -67,50 +87,53 @@ export default function ComparisonPage() {
               <div>
                 <p className="font-semibold text-caption mb-1">Gedeelde woorden</p>
                 <div className="flex flex-wrap gap-1">
-                  {sharedWords.length > 0 ? sharedWords.map((w) => (
-                    <span key={w} className="rounded bg-secondary px-2 py-0.5 text-xs">{w}</span>
-                  )) : <span className="text-caption text-xs">Geen</span>}
+                  {sharedWords.length > 0
+                    ? sharedWords.map((w) => (
+                        <span key={w} className="rounded bg-secondary px-2 py-0.5 text-xs">{w}</span>
+                      ))
+                    : <span className="text-caption text-xs">Geen</span>}
                 </div>
               </div>
-              <div>
-                <p className="font-semibold mb-1" style={{ color: `hsl(var(--bias-${outletA.bias}))` }}>
-                  Uniek {outletA.name}
-                </p>
-                <div className="flex flex-wrap gap-1">
-                  {uniqueA.map((w) => (
-                    <span key={w} className="rounded px-2 py-0.5 text-xs text-primary-foreground" style={{ backgroundColor: `hsl(var(--bias-${outletA.bias}))` }}>{w}</span>
-                  ))}
+              {[
+                { outlet: outletA, bias: biasA, words: uniqueA },
+                { outlet: outletB, bias: biasB, words: uniqueB },
+              ].map(({ outlet, bias, words }) => (
+                <div key={outlet?.id ?? bias}>
+                  <p className="font-semibold mb-1" style={{ color: `hsl(var(--bias-${bias}))` }}>
+                    Uniek {outlet?.name ?? bias}
+                  </p>
+                  <div className="flex flex-wrap gap-1">
+                    {words.map((w) => (
+                      <span
+                        key={w}
+                        className="rounded px-2 py-0.5 text-xs text-primary-foreground"
+                        style={{ backgroundColor: `hsl(var(--bias-${bias}))` }}
+                      >
+                        {w}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              </div>
-              <div>
-                <p className="font-semibold mb-1" style={{ color: `hsl(var(--bias-${outletB.bias}))` }}>
-                  Uniek {outletB.name}
-                </p>
-                <div className="flex flex-wrap gap-1">
-                  {uniqueB.map((w) => (
-                    <span key={w} className="rounded px-2 py-0.5 text-xs text-primary-foreground" style={{ backgroundColor: `hsl(var(--bias-${outletB.bias}))` }}>{w}</span>
-                  ))}
-                </div>
-              </div>
+              ))}
             </div>
           </div>
 
           {/* Side by side */}
           <div className="grid gap-6 md:grid-cols-2">
             {[
-              { article: articleA, outlet: outletA },
-              { article: articleB, outlet: outletB },
-            ].map(({ article, outlet }) => (
+              { article: articleA, outlet: outletA, bias: biasA },
+              { article: articleB, outlet: outletB, bias: biasB },
+            ].map(({ article, outlet, bias }) => (
               <div
                 key={article.id}
                 className="rounded-lg border-t-4 bg-card p-6"
-                style={{ borderTopColor: `hsl(var(--bias-${outlet.bias}))` }}
+                style={{ borderTopColor: `hsl(var(--bias-${bias}))` }}
               >
                 <div className="mb-3 flex items-center gap-2">
                   <span className="font-body text-xs font-semibold uppercase tracking-wider text-caption">
-                    {outlet.name}
+                    {outlet?.name ?? article.outletId}
                   </span>
-                  <BiasTag bias={outlet.bias} />
+                  <BiasTag bias={bias} />
                 </div>
 
                 <h2 className="mb-4 font-headline text-xl font-bold text-headline leading-tight">

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { getEvent, getArticlesForEvent, getOutlet } from "@/lib/data";
+import { useEvent } from "@/hooks/useEvent";
+import { getOutlet } from "@/lib/data";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { ArticleCard } from "@/components/ArticleCard";
@@ -8,16 +9,33 @@ import { BiasBar, BiasTag } from "@/components/BiasIndicator";
 import { IdeologicalCanvas } from "@/components/IdeologicalCanvas";
 import { ArticlePopup } from "@/components/ArticlePopup";
 import { BIAS_META } from "@/lib/types";
-import type { Article } from "@/lib/types";
+import type { Article, BiasLabel } from "@/lib/types";
 import { ArrowLeft, Calendar, CheckCircle, Scale, LayoutList, Compass } from "lucide-react";
 
 type View = "articles" | "canvas";
 
 export default function EventPage() {
   const { id } = useParams<{ id: string }>();
-  const event = getEvent(id!);
+  const { event, isLoading } = useEvent(id);
   const [view, setView] = useState<View>("articles");
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
+
+  if (isLoading) {
+    return (
+      <div className="flex min-h-screen flex-col bg-background">
+        <Header />
+        <main className="container flex-1 py-12 space-y-4">
+          <div className="h-8 w-48 rounded bg-muted animate-pulse" />
+          <div className="h-12 w-2/3 rounded bg-muted animate-pulse" />
+          <div className="h-4 w-full max-w-xl rounded bg-muted animate-pulse" />
+          <div className="grid gap-6 md:grid-cols-2 mt-8">
+            {[...Array(4)].map((_, i) => <div key={i} className="h-40 rounded-lg bg-muted animate-pulse" />)}
+          </div>
+        </main>
+        <Footer />
+      </div>
+    );
+  }
 
   if (!event) {
     return (
@@ -31,13 +49,19 @@ export default function EventPage() {
     );
   }
 
-  const eventArticles = getArticlesForEvent(event.id);
-  const biases = eventArticles.map((a) => getOutlet(a.outletId)!.bias);
+  const eventArticles = (event.articles ?? []) as Article[];
+  const biases = eventArticles.map((a) => {
+    const outlet = (a as any).outlet ?? getOutlet(a.outletId);
+    return (outlet?.bias ?? "center") as BiasLabel;
+  });
   const uniqueBiases = [...new Set(biases)];
 
   const grouped = uniqueBiases.map((bias) => ({
     bias,
-    articles: eventArticles.filter((a) => getOutlet(a.outletId)!.bias === bias),
+    articles: eventArticles.filter((a) => {
+      const outlet = (a as any).outlet ?? getOutlet(a.outletId);
+      return outlet?.bias === bias;
+    }),
   }));
 
   const comparisonPairs: [string, string][] = [];
@@ -73,9 +97,7 @@ export default function EventPage() {
             <h1 className="font-headline text-3xl font-extrabold text-headline md:text-4xl">
               {event.title}
             </h1>
-            <p className="mt-3 max-w-2xl text-body font-body leading-relaxed">
-              {event.summary}
-            </p>
+            <p className="mt-3 max-w-2xl text-body font-body leading-relaxed">{event.summary}</p>
 
             <div className="mt-6 max-w-md">
               <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-caption font-body">
@@ -83,9 +105,7 @@ export default function EventPage() {
               </p>
               <BiasBar biases={biases} className="mb-2" />
               <div className="flex flex-wrap gap-1.5">
-                {uniqueBiases.map((b) => (
-                  <BiasTag key={b} bias={b} />
-                ))}
+                {uniqueBiases.map((b) => <BiasTag key={b} bias={b} />)}
               </div>
             </div>
           </div>
@@ -95,24 +115,18 @@ export default function EventPage() {
             <button
               onClick={() => setView("articles")}
               className={`flex items-center gap-2 rounded px-4 py-2 text-sm font-body font-medium transition-colors ${
-                view === "articles"
-                  ? "bg-card text-headline shadow-sm"
-                  : "text-caption hover:text-foreground"
+                view === "articles" ? "bg-card text-headline shadow-sm" : "text-caption hover:text-foreground"
               }`}
             >
-              <LayoutList className="h-4 w-4" />
-              Perspectieven
+              <LayoutList className="h-4 w-4" /> Perspectieven
             </button>
             <button
               onClick={() => setView("canvas")}
               className={`flex items-center gap-2 rounded px-4 py-2 text-sm font-body font-medium transition-colors ${
-                view === "canvas"
-                  ? "bg-card text-headline shadow-sm"
-                  : "text-caption hover:text-foreground"
+                view === "canvas" ? "bg-card text-headline shadow-sm" : "text-caption hover:text-foreground"
               }`}
             >
-              <Compass className="h-4 w-4" />
-              Ideologisch canvas
+              <Compass className="h-4 w-4" /> Ideologisch canvas
             </button>
           </div>
 
@@ -123,20 +137,15 @@ export default function EventPage() {
                 <h2 className="mb-6 font-headline text-xl font-bold text-headline">
                   Artikelen per perspectief
                 </h2>
-
                 <div className="space-y-8">
                   {grouped.map(({ bias, articles }) => (
                     <div key={bias}>
                       <div className="mb-3 flex items-center gap-2">
                         <BiasTag bias={bias} size="md" />
-                        <span className="text-xs text-caption font-body">
-                          {BIAS_META[bias].description}
-                        </span>
+                        <span className="text-xs text-caption font-body">{BIAS_META[bias].description}</span>
                       </div>
                       <div className="space-y-3">
-                        {articles.map((article) => (
-                          <ArticleCard key={article.id} article={article} />
-                        ))}
+                        {articles.map((article) => <ArticleCard key={article.id} article={article} />)}
                       </div>
                     </div>
                   ))}
@@ -145,22 +154,23 @@ export default function EventPage() {
                 {comparisonPairs.length > 0 && (
                   <div className="mt-10 rounded-lg border border-divider bg-surface-warm p-5">
                     <h3 className="mb-3 flex items-center gap-2 font-headline text-lg font-bold text-headline">
-                      <Scale className="h-5 w-5 text-accent" />
-                      Vergelijk perspectieven
+                      <Scale className="h-5 w-5 text-accent" /> Vergelijk perspectieven
                     </h3>
                     <div className="space-y-2">
                       {comparisonPairs.map(([a, b], i) => {
                         const artA = eventArticles.find((x) => x.id === a)!;
                         const artB = eventArticles.find((x) => x.id === b)!;
+                        const outA = (artA as any).outlet ?? getOutlet(artA.outletId);
+                        const outB = (artB as any).outlet ?? getOutlet(artB.outletId);
                         return (
                           <Link
                             key={i}
                             to={`/vergelijk/${a}/${b}`}
                             className="block rounded border border-divider bg-card p-3 text-sm font-body text-body hover:border-accent/40 transition-colors"
                           >
-                            <span className="font-semibold">{getOutlet(artA.outletId)!.name}</span>
+                            <span className="font-semibold">{outA?.name}</span>
                             {" vs "}
-                            <span className="font-semibold">{getOutlet(artB.outletId)!.name}</span>
+                            <span className="font-semibold">{outB?.name}</span>
                           </Link>
                         );
                       })}
@@ -173,8 +183,7 @@ export default function EventPage() {
                 <aside>
                   <div className="sticky top-8 rounded-lg border border-divider bg-surface-cool p-5">
                     <h3 className="mb-4 flex items-center gap-2 font-headline text-lg font-bold text-headline">
-                      <CheckCircle className="h-5 w-5 text-accent" />
-                      Gedeelde feiten
+                      <CheckCircle className="h-5 w-5 text-accent" /> Gedeelde feiten
                     </h3>
                     <p className="mb-4 text-xs text-caption font-body">
                       Feiten die in meerdere bronnen voorkomen:
@@ -200,10 +209,7 @@ export default function EventPage() {
                 Elk punt is een artikel. Klik om te lezen · sleep om te bewegen · scroll om in/uit te zoomen.
               </p>
               <div style={{ height: "560px" }}>
-                <IdeologicalCanvas
-                  articles={eventArticles}
-                  onArticleClick={setSelectedArticle}
-                />
+                <IdeologicalCanvas articles={eventArticles} onArticleClick={setSelectedArticle} />
               </div>
             </div>
           )}
