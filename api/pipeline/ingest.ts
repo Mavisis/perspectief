@@ -1,19 +1,38 @@
-// Node.js runtime — needs longer timeout for RSS + Claude API calls
+// Node.js runtime — needs longer timeout for RSS + Gemini API calls
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import Anthropic from "@anthropic-ai/sdk";
 import { makeSupabase } from "../lib/supabase";
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ── Auth guard ────────────────────────────────────────────────
 function isAuthorized(req: VercelRequest): boolean {
   const secret = process.env.PIPELINE_SECRET;
   if (!secret) return false;
-  const header = req.headers["authorization"] ?? "";
-  return header === `Bearer ${secret}`;
+  return req.headers["authorization"] === `Bearer ${secret}`;
 }
 
-// ── RSS parser (no external deps, Edge-compatible XML) ────────
+// ── Google Gemini helper ──────────────────────────────────────
+async function gemini(prompt: string, maxTokens = 200): Promise<string> {
+  const key = process.env.GOOGLE_API_KEY;
+  if (!key) throw new Error("GOOGLE_API_KEY not set");
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.1, maxOutputTokens: maxTokens },
+      }),
+      signal: AbortSignal.timeout(15000),
+    }
+  );
+
+  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
+  const data: any = await res.json();
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
+}
+
+// ── RSS parser ────────────────────────────────────────────────
 interface RssItem {
   title: string;
   description: string;
@@ -28,13 +47,12 @@ function parseRss(xml: string): RssItem[] {
 
   while ((match = itemRegex.exec(xml)) !== null) {
     const block = match[1];
-    const get = (tag: string) => {
-      const m = block.match(new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`, "i"))
-        ?? block.match(new RegExp(`<${tag}[^>]*>([^<]*)<\\/${tag}>`, "i"));
-      return m?.[1]?.trim() ?? "";
-    };
+    const get = (tag: string) =>
+      (block.match(new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`, "i")) ??
+        block.match(new RegExp(`<${tag}[^>]*>([^<]*)<\\/${tag}>`, "i")))?.[1]?.trim() ?? "";
+
     const title = get("title");
-    const link = get("link") || block.match(/<link\s*\/?>[\s]*([^<]+)/i)?.[1]?.trim() ?? "";
+    const link = get("link") || block.match(/<link\s*\/?>\s*([^<]+)/i)?.[1]?.trim() ?? "";
     if (title && link) {
       items.push({ title, description: get("description"), link, pubDate: get("pubDate") });
     }
@@ -42,83 +60,64 @@ function parseRss(xml: string): RssItem[] {
   return items;
 }
 
-// ── Claude: classify article ideology ────────────────────────
-interface IdeologyResult {
-  x: number;
-  y: number;
-}
-
+// ── Classify ideology via Gemini ──────────────────────────────
 async function classifyIdeology(
   outletName: string,
   headline: string,
   summary: string
-): Promise<IdeologyResult> {
-  const msg = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 100,
-    messages: [
-      {
-        role: "user",
-        content: `You are a Dutch media bias analyst. Classify this article's ideological position on a 2D scale.
-X axis: -1.0 (far left) to +1.0 (far right)
-Y axis: -1.0 (progressive/liberal) to +1.0 (conservative)
+): Promise<{ x: number; y: number }> {
+  const text = await gemini(
+    `Je bent een Nederlandse media-analist. Classificeer dit artikel op een 2D ideologische schaal.
+X-as: -1.0 (extreem links) tot +1.0 (extreem rechts)
+Y-as: -1.0 (progressief/liberaal) tot +1.0 (conservatief)
 
-Outlet: ${outletName}
-Headline: ${headline}
-Summary: ${summary}
+Medium: ${outletName}
+Kop: ${headline}
+Samenvatting: ${summary}
 
-Reply with ONLY valid JSON: {"x": float, "y": float}`,
-      },
-    ],
-  });
+Antwoord ALLEEN met geldig JSON: {"x": getal, "y": getal}`,
+    100
+  );
 
-  const text = msg.content[0].type === "text" ? msg.content[0].text.trim() : "";
   try {
-    const parsed = JSON.parse(text.replace(/```json?|```/g, "").trim());
+    const p = JSON.parse(text.replace(/```json?|```/g, "").trim());
     const clamp = (v: number) => Math.max(-1, Math.min(1, Number(v) || 0));
-    return { x: clamp(parsed.x), y: clamp(parsed.y) };
+    return { x: clamp(p.x), y: clamp(p.y) };
   } catch {
     return { x: 0, y: 0 };
   }
 }
 
-// ── Claude: match or create event ────────────────────────────
+// ── Match or create event via Gemini ─────────────────────────
 async function matchEvent(
   headline: string,
   summary: string,
-  existingEvents: Array<{ id: string; title: string; summary: string }>
+  existing: Array<{ id: string; title: string }>
 ): Promise<{ eventId: string | null; newTitle?: string; newSummary?: string }> {
-  const eventList = existingEvents
+  const list = existing
     .slice(0, 10)
-    .map((e) => `- id:${e.id} title:"${e.title}"`)
+    .map((e) => `- id:${e.id} titel:"${e.title}"`)
     .join("\n");
 
-  const msg = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 200,
-    messages: [
-      {
-        role: "user",
-        content: `You are a Dutch news editor. Does this article cover the same news event as one of the recent events listed below?
+  const text = await gemini(
+    `Je bent een Nederlandse nieuwsredacteur. Hoort dit artikel bij een van de recente nieuwsgebeurtenissen?
 
-Article headline: "${headline}"
-Article summary: "${summary}"
+Kop: "${headline}"
+Samenvatting: "${summary}"
 
-Recent events:
-${eventList || "(none yet)"}
+Recente gebeurtenissen:
+${list || "(nog geen)"}
 
-Reply with ONLY valid JSON:
-- If it matches: {"match": "EVENT_ID_HERE"}
-- If it's a new event: {"new": true, "title": "Short Dutch event title", "summary": "One sentence Dutch summary"}`,
-      },
-    ],
-  });
+Antwoord ALLEEN met geldig JSON:
+- Bij match: {"match": "EVENT_ID"}
+- Nieuw event: {"new": true, "title": "Korte Nederlandse titel", "summary": "Één zin samenvatting"}`,
+    200
+  );
 
-  const text = msg.content[0].type === "text" ? msg.content[0].text.trim() : "";
   try {
-    const parsed = JSON.parse(text.replace(/```json?|```/g, "").trim());
-    if (parsed.match) return { eventId: parsed.match };
-    if (parsed.new) return { eventId: null, newTitle: parsed.title, newSummary: parsed.summary };
+    const p = JSON.parse(text.replace(/```json?|```/g, "").trim());
+    if (p.match) return { eventId: p.match };
+    if (p.new) return { eventId: null, newTitle: p.title, newSummary: p.summary };
   } catch { /* fall through */ }
   return { eventId: null };
 }
@@ -127,14 +126,12 @@ Reply with ONLY valid JSON:
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!isAuthorized(req)) return res.status(401).json({ error: "Unauthorized" });
 
-  const db = makeSupabase(true); // service role for writes
+  const db = makeSupabase(true);
   const stats = { outlets: 0, fetched: 0, inserted: 0, errors: [] as string[] };
 
-  // 1. Load outlets
   const { data: outlets } = await db.from("outlets").select("id, name, rss_url");
   if (!outlets?.length) return res.status(500).json({ error: "No outlets found" });
 
-  // 2. Load recent events for clustering (last 14 days)
   const since = new Date(Date.now() - 14 * 86400_000).toISOString();
   const { data: recentEvents } = await db
     .from("events")
@@ -143,7 +140,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     .order("created_at", { ascending: false })
     .limit(20);
 
-  const eventCache = recentEvents ?? [];
+  const eventCache = (recentEvents ?? []) as Array<{ id: string; title: string; summary: string }>;
 
   for (const outlet of outlets) {
     if (!outlet.rss_url) continue;
@@ -156,13 +153,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
       if (!rssRes.ok) throw new Error(`RSS ${rssRes.status}`);
 
-      const xml = await rssRes.text();
-      const items = parseRss(xml).slice(0, 5); // max 5 per outlet per run
+      const items = parseRss(await rssRes.text()).slice(0, 5);
 
       for (const item of items) {
         stats.fetched++;
 
-        // Skip already-ingested URLs
         const { data: existing } = await db
           .from("articles")
           .select("id")
@@ -170,11 +165,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           .maybeSingle();
         if (existing) continue;
 
-        // Classify ideology
-        const ideology = await classifyIdeology(outlet.name, item.title, item.description);
-
-        // Match or create event
-        const eventResult = await matchEvent(item.title, item.description, eventCache);
+        const [ideology, eventResult] = await Promise.all([
+          classifyIdeology(outlet.name, item.title, item.description),
+          matchEvent(item.title, item.description, eventCache),
+        ]);
 
         let eventId = eventResult.eventId;
         if (!eventId && eventResult.newTitle) {
@@ -190,11 +184,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             .single();
           if (newEvent) {
             eventId = newEvent.id;
-            eventCache.unshift({ id: newEvent.id, title: newEvent.title, summary: newEvent.summary });
+            eventCache.unshift(newEvent as any);
           }
         }
 
-        // Insert article
         const { error: insertErr } = await db.from("articles").insert({
           headline: item.title,
           summary: item.description.slice(0, 500),
@@ -203,15 +196,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           event_id: eventId,
           published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
           source_url: item.link,
-          // Store ideology on outlet update if it drifts — for now store per-article via a jsonb column
-          // (ideology already lives on the outlet row; article-level jitter happens client-side)
         });
 
-        if (insertErr) {
-          stats.errors.push(`${outlet.id}: ${insertErr.message}`);
-        } else {
-          stats.inserted++;
-        }
+        if (insertErr) stats.errors.push(`${outlet.id}: ${insertErr.message}`);
+        else stats.inserted++;
       }
     } catch (err: any) {
       stats.errors.push(`${outlet.id}: ${err.message}`);
