@@ -9,13 +9,36 @@ function isAuthorized(req: VercelRequest): boolean {
   return req.headers["authorization"] === `Bearer ${secret}`;
 }
 
-// ── Google Gemini helper ──────────────────────────────────────
-async function gemini(prompt: string, maxTokens = 200): Promise<string> {
-  const key = process.env.GOOGLE_API_KEY;
-  if (!key) throw new Error("GOOGLE_API_KEY not set");
+const GOOGLE_KEY = () => {
+  const k = process.env.GOOGLE_API_KEY;
+  if (!k) throw new Error("GOOGLE_API_KEY not set");
+  return k;
+};
 
+// ── Embedding (gemini-embedding-2, 768-dim truncation) ────────
+async function embed(text: string): Promise<number[]> {
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=${GOOGLE_KEY()}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: { parts: [{ text }] },
+        taskType: "SEMANTIC_SIMILARITY",
+        outputDimensionality: 768,
+      }),
+      signal: AbortSignal.timeout(10000),
+    }
+  );
+  if (!res.ok) throw new Error(`Embed ${res.status}`);
+  const data: any = await res.json();
+  return data.embedding.values as number[];
+}
+
+// ── Gemini text generation ────────────────────────────────────
+async function gemini(prompt: string, maxTokens = 200): Promise<string> {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GOOGLE_KEY()}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -26,100 +49,88 @@ async function gemini(prompt: string, maxTokens = 200): Promise<string> {
       signal: AbortSignal.timeout(15000),
     }
   );
-
-  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Gemini ${res.status}`);
   const data: any = await res.json();
   return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
 }
 
 // ── RSS parser ────────────────────────────────────────────────
-interface RssItem {
-  title: string;
-  description: string;
-  link: string;
-  pubDate: string;
-}
+interface RssItem { title: string; description: string; link: string; pubDate: string; }
 
 function parseRss(xml: string): RssItem[] {
   const items: RssItem[] = [];
   const itemRegex = /<item>([\s\S]*?)<\/item>/gi;
   let match: RegExpExecArray | null;
-
   while ((match = itemRegex.exec(xml)) !== null) {
     const block = match[1];
     const get = (tag: string) =>
       (block.match(new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`, "i")) ??
         block.match(new RegExp(`<${tag}[^>]*>([^<]*)<\\/${tag}>`, "i")))?.[1]?.trim() ?? "";
-
     const title = get("title");
     const link = (get("link") || block.match(/<link\s*\/?>\s*([^<]+)/i)?.[1]?.trim()) ?? "";
-    if (title && link) {
-      items.push({ title, description: get("description"), link, pubDate: get("pubDate") });
-    }
+    if (title && link) items.push({ title, description: get("description"), link, pubDate: get("pubDate") });
   }
   return items;
 }
 
-// ── Classify ideology via Gemini ──────────────────────────────
-async function classifyIdeology(
-  outletName: string,
-  headline: string,
-  summary: string
-): Promise<{ x: number; y: number }> {
-  const text = await gemini(
-    `Je bent een Nederlandse media-analist. Classificeer dit artikel op een 2D ideologische schaal.
-X-as: -1.0 (extreem links) tot +1.0 (extreem rechts)
-Y-as: -1.0 (progressief/liberaal) tot +1.0 (conservatief)
-
-Medium: ${outletName}
-Kop: ${headline}
-Samenvatting: ${summary}
-
-Antwoord ALLEEN met geldig JSON: {"x": getal, "y": getal}`,
-    100
-  );
-
-  try {
-    const p = JSON.parse(text.replace(/```json?|```/g, "").trim());
-    const clamp = (v: number) => Math.max(-1, Math.min(1, Number(v) || 0));
-    return { x: clamp(p.x), y: clamp(p.y) };
-  } catch {
-    return { x: 0, y: 0 };
-  }
+// ── Three-tier event matching ─────────────────────────────────
+//
+//  1. Vector search (cosine similarity via pgvector)
+//     ≥ 0.85  → confident match, skip LLM entirely
+//     0.60–0.85 → ambiguous, ask Gemini to confirm
+//     < 0.60  → clearly new event, ask Gemini to name it
+//
+interface MatchResult {
+  eventId: string | null;
+  newTitle?: string;
+  newSummary?: string;
+  articleEmbedding: number[];
 }
 
-// ── Match or create event via Gemini ─────────────────────────
 async function matchEvent(
+  db: ReturnType<typeof makeSupabase>,
   headline: string,
-  summary: string,
-  existing: Array<{ id: string; title: string }>
-): Promise<{ eventId: string | null; newTitle?: string; newSummary?: string }> {
-  const list = existing
-    .slice(0, 10)
-    .map((e) => `- id:${e.id} titel:"${e.title}"`)
-    .join("\n");
+  summary: string
+): Promise<MatchResult> {
+  const articleEmbedding = await embed(`${headline} ${summary}`);
+  const vectorStr = `[${articleEmbedding.join(",")}]`;
 
-  const text = await gemini(
-    `Je bent een Nederlandse nieuwsredacteur. Hoort dit artikel bij een van de recente nieuwsgebeurtenissen?
+  const { data: matches } = await db.rpc("match_event", {
+    query_embedding: vectorStr,
+    match_threshold: 0.60,
+    match_count: 1,
+  });
 
-Kop: "${headline}"
-Samenvatting: "${summary}"
+  const best = (matches as Array<{ id: string; title: string; similarity: number }> | null)?.[0];
 
-Recente gebeurtenissen:
-${list || "(nog geen)"}
+  // Tier 1 — high confidence match
+  if (best && best.similarity >= 0.85) {
+    return { eventId: best.id, articleEmbedding };
+  }
 
-Antwoord ALLEEN met geldig JSON:
-- Bij match: {"match": "EVENT_ID"}
-- Nieuw event: {"new": true, "title": "Korte Nederlandse titel", "summary": "Één zin samenvatting"}`,
-    200
+  // Tier 2 — ambiguous: let Gemini confirm against the single candidate
+  if (best && best.similarity >= 0.60) {
+    const raw = await gemini(
+      `Is dit artikel over hetzelfde nieuwsonderwerp als de volgende gebeurtenis?\n\nArtikel kop: "${headline}"\nGebeurtenis: "${best.title}"\n\nAntwoord ALLEEN met JSON: {"match": true} of {"match": false}`,
+      50
+    );
+    try {
+      const parsed = JSON.parse(raw.replace(/```json?|```/g, "").trim());
+      if (parsed.match === true) return { eventId: best.id, articleEmbedding };
+    } catch { /* fall through to new event */ }
+  }
+
+  // Tier 3 — new event: ask Gemini to generate title + summary
+  const raw = await gemini(
+    `Je bent een Nederlandse nieuwsredacteur. Geef een korte titel en samenvatting voor dit nieuwsonderwerp.\n\nKop: "${headline}"\nSamenvatting: "${summary}"\n\nAntwoord ALLEEN met JSON: {"title": "...", "summary": "..."}`,
+    150
   );
-
   try {
-    const p = JSON.parse(text.replace(/```json?|```/g, "").trim());
-    if (p.match) return { eventId: p.match };
-    if (p.new) return { eventId: null, newTitle: p.title, newSummary: p.summary };
-  } catch { /* fall through */ }
-  return { eventId: null };
+    const parsed = JSON.parse(raw.replace(/```json?|```/g, "").trim());
+    return { eventId: null, newTitle: parsed.title, newSummary: parsed.summary, articleEmbedding };
+  } catch {
+    return { eventId: null, newTitle: headline, newSummary: summary, articleEmbedding };
+  }
 }
 
 // ── Main handler ──────────────────────────────────────────────
@@ -127,20 +138,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!isAuthorized(req)) return res.status(401).json({ error: "Unauthorized" });
 
   const db = makeSupabase(true);
-  const stats = { outlets: 0, fetched: 0, inserted: 0, errors: [] as string[] };
+  const stats = { outlets: 0, fetched: 0, skipped: 0, inserted: 0, errors: [] as string[] };
 
   const { data: outlets } = await db.from("outlets").select("id, name, rss_url");
   if (!outlets?.length) return res.status(500).json({ error: "No outlets found" });
 
-  const since = new Date(Date.now() - 14 * 86400_000).toISOString();
-  const { data: recentEvents } = await db
-    .from("events")
-    .select("id, title, summary")
-    .gte("created_at", since)
-    .order("created_at", { ascending: false })
-    .limit(20);
-
-  const eventCache = (recentEvents ?? []) as Array<{ id: string; title: string; summary: string }>;
+  // Auto-backfill any events without embeddings (idempotent)
+  const { data: unembedded } = await db.from("events").select("id, title, summary").is("embedding", null);
+  for (const ev of unembedded ?? []) {
+    const vec = await embed(`${ev.title} ${ev.summary}`);
+    await db.from("events").update({ embedding: `[${vec.join(",")}]` }).eq("id", ev.id);
+  }
 
   for (const outlet of outlets) {
     if (!outlet.rss_url) continue;
@@ -159,33 +167,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         stats.fetched++;
 
         const { data: existing } = await db
-          .from("articles")
-          .select("id")
-          .eq("source_url", item.link)
-          .maybeSingle();
-        if (existing) continue;
+          .from("articles").select("id").eq("source_url", item.link).maybeSingle();
+        if (existing) { stats.skipped++; continue; }
 
-        const [ideology, eventResult] = await Promise.all([
-          classifyIdeology(outlet.name, item.title, item.description),
-          matchEvent(item.title, item.description, eventCache),
-        ]);
+        const { eventId, newTitle, newSummary, articleEmbedding } =
+          await matchEvent(db, item.title, item.description);
 
-        let eventId = eventResult.eventId;
-        if (!eventId && eventResult.newTitle) {
+        let resolvedEventId = eventId;
+
+        if (!resolvedEventId && newTitle) {
+          const eventEmbedding = await embed(`${newTitle} ${newSummary ?? newTitle}`);
           const { data: newEvent } = await db
             .from("events")
             .insert({
-              title: eventResult.newTitle,
+              title: newTitle,
               date: new Date().toISOString().slice(0, 10),
-              summary: eventResult.newSummary ?? eventResult.newTitle,
+              summary: newSummary ?? newTitle,
               shared_facts: [],
+              embedding: `[${eventEmbedding.join(",")}]`,
             })
-            .select("id, title, summary")
+            .select("id")
             .single();
-          if (newEvent) {
-            eventId = newEvent.id;
-            eventCache.unshift(newEvent as any);
-          }
+          resolvedEventId = newEvent?.id ?? null;
         }
 
         const { error: insertErr } = await db.from("articles").insert({
@@ -193,7 +196,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           summary: item.description.slice(0, 500),
           content: item.description,
           outlet_id: outlet.id,
-          event_id: eventId,
+          event_id: resolvedEventId,
           published_at: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
           source_url: item.link,
         });
