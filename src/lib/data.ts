@@ -7,8 +7,10 @@ export const outlets: Outlet[] = [
   { id: "ad",         name: "AD",            bias: "center",       ideology: { x:  0.1,  y:  0.0 } },
   { id: "nos",        name: "NOS",           bias: "center",       ideology: { x:  0.0,  y: -0.1 } },
   { id: "telegraaf",  name: "De Telegraaf",  bias: "center-right", ideology: { x:  0.7,  y:  0.4 } },
-  { id: "rd",         name: "Reformatorisch Dagblad", bias: "religious", ideology: { x: 0.4, y: 0.8 } },
-  { id: "geenstijl",  name: "GeenStijl",     bias: "right",        ideology: { x:  0.85, y:  0.5 } },
+  { id: "rd",         name: "Reformatorisch Dagblad", bias: "religious",   ideology: { x:  0.4,  y:  0.8 } },
+  { id: "geenstijl",  name: "GeenStijl",            bias: "right",        ideology: { x:  0.85, y:  0.5 } },
+  { id: "nd",         name: "Nederlands Dagblad",    bias: "religious",   ideology: { x:  0.3,  y:  0.7 } },
+  { id: "fd",         name: "Het Financieele Dagblad", bias: "center-right", ideology: { x: 0.4, y: -0.1 } },
 ];
 
 export const articles: Article[] = [
