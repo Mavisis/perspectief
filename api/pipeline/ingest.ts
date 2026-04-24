@@ -1,6 +1,6 @@
 // Node.js runtime — needs longer timeout for RSS + Gemini API calls
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { makeSupabase } from "../lib/supabase";
+import { makeSupabase } from "../lib/supabase.js";
 
 // ── Auth guard ────────────────────────────────────────────────
 function isAuthorized(req: VercelRequest): boolean {
@@ -52,7 +52,7 @@ function parseRss(xml: string): RssItem[] {
         block.match(new RegExp(`<${tag}[^>]*>([^<]*)<\\/${tag}>`, "i")))?.[1]?.trim() ?? "";
 
     const title = get("title");
-    const link = get("link") || block.match(/<link\s*\/?>\s*([^<]+)/i)?.[1]?.trim() ?? "";
+    const link = (get("link") || block.match(/<link\s*\/?>\s*([^<]+)/i)?.[1]?.trim()) ?? "";
     if (title && link) {
       items.push({ title, description: get("description"), link, pubDate: get("pubDate") });
     }

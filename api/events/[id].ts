@@ -1,6 +1,6 @@
 export const config = { runtime: "edge" };
 
-import { makeSupabase } from "../lib/supabase";
+import { makeSupabase } from "../lib/supabase.js";
 
 export default async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url);
